@@ -1,0 +1,242 @@
+#define NUM_JOINTS 6
+
+const uint8_t stepPins[NUM_JOINTS] = {18, 26, 13, 15, 32, 27};
+const uint8_t dirPins[NUM_JOINTS]  = {19, 25, 12, 16, 33, 14};
+const float stepsPerDegree[NUM_JOINTS] = {
+  160.0,    // 18:1
+  302.22,   // 34:1
+  203.17,   // 22.857:1
+  259.04,   // 29.142:1
+  48.25,    // 5.4285:1
+  222.22    // 25:1
+};
+
+// Current positions (in degrees)
+float currentPos[NUM_JOINTS] = {0, 0, 0, 0, 0, 0};
+
+// Speed and acceleration settings
+const int MAX_SPEED_DELAY = 200;      // microseconds (minimum delay = max speed)
+const int MIN_SPEED_DELAY = 200;     // microseconds (maximum delay = min speed)
+const int PULSE_WIDTH = 1;            // microseconds for step pulse
+const float ACCEL_PERCENTAGE = 1;  // 25% of motion for acceleration, 25% for deceleration
+
+void setup() {
+  Serial.begin(9600);
+  for(int i = 0; i < NUM_JOINTS; i++){
+    pinMode(stepPins[i], OUTPUT);
+    pinMode(dirPins[i], OUTPUT);
+    digitalWrite(stepPins[i], LOW);
+    digitalWrite(dirPins[i], LOW);
+  }
+  delay(100);
+  Serial.println("ESP32 6-Axis Stepper Controller Ready");
+  Serial.println("Waiting for commands...");
+  Serial.println("Format: ANGLES,j1,j2,j3,j4,j5,j6");
+  Serial.println();
+}
+
+// Calculate delay based on motion phase (S-curve profile)
+int calculateDelay(long currentStep, long totalSteps) {
+  if(totalSteps == 0) return MAX_SPEED_DELAY;
+  
+  float progress = (float)currentStep / (float)totalSteps;
+  long accelSteps = totalSteps * ACCEL_PERCENTAGE;
+  long decelSteps = totalSteps * ACCEL_PERCENTAGE;
+  
+  float speedFactor = 1.0; // 1.0 = max speed, 0.0 = min speed
+  
+  // Acceleration phase (first 25%)
+  if(currentStep < accelSteps) {
+    // Smooth S-curve acceleration using sine
+    float accelProgress = (float)currentStep / (float)accelSteps;
+    speedFactor = (sin((accelProgress - 0.5) * PI) + 1.0) / 2.0;
+  }
+  // Deceleration phase (last 25%)
+  else if(currentStep > (totalSteps - decelSteps)) {
+    // Smooth S-curve deceleration using sine
+    float decelProgress = (float)(totalSteps - currentStep) / (float)decelSteps;
+    speedFactor = (sin((decelProgress - 0.5) * PI) + 1.0) / 2.0;
+  }
+  // Constant speed phase (middle 50%)
+  else {
+    speedFactor = 1.0;
+  }
+  
+  // Calculate delay: interpolate between min and max speed
+  int delay_us = MIN_SPEED_DELAY - ((MIN_SPEED_DELAY - MAX_SPEED_DELAY) * speedFactor);
+  
+  return delay_us;
+}
+
+// Move motors to target angles (array of 6 angles)
+void moveToAngles(float targetAngles[NUM_JOINTS]) {
+  // Calculate steps needed for each motor
+  long stepsNeeded[NUM_JOINTS];
+  long stepsTaken[NUM_JOINTS];
+  bool motorActive[NUM_JOINTS];
+  long maxSteps = 0;
+  int activeMotorCount = 0;
+  
+  Serial.print("Target: [");
+  for(int i = 0; i < NUM_JOINTS; i++) {
+    Serial.print(targetAngles[i], 2);
+    if(i < NUM_JOINTS - 1) Serial.print(", ");
+  }
+  Serial.print("] -> ");
+  
+  for(int i = 0; i < NUM_JOINTS; i++) {
+    float angleDiff = targetAngles[i] - currentPos[i];
+    stepsNeeded[i] = abs((long)(angleDiff * stepsPerDegree[i]));
+    stepsTaken[i] = 0;
+    
+    // Check if this motor needs to move
+    if(stepsNeeded[i] > 0) {
+      motorActive[i] = true;
+      activeMotorCount++;
+      
+      // Set direction based on angle difference
+      if(angleDiff > 0) {
+        if(i==2 || i==3 || i==4){
+        digitalWrite(dirPins[i], HIGH); }
+        else{digitalWrite(dirPins[i], LOW);}
+        //digitalWrite(dirPins[i], LOW);  // Positive direction
+      }
+      else {
+
+          if(i==2 || i==3 || i==4){
+          digitalWrite(dirPins[i], LOW); }
+          else{digitalWrite(dirPins[i], HIGH);}
+
+        //digitalWrite(dirPins[i], HIGH);   // Negative direction
+      }
+      
+      // Find the motor that needs the most steps
+      if(stepsNeeded[i] > maxSteps) {
+        maxSteps = stepsNeeded[i];
+      }
+    } else {
+      motorActive[i] = false;
+    }
+  }
+  
+  // If no movement needed, return
+  if(maxSteps == 0) {
+    Serial.println("Already at target");
+    return;
+  }
+  
+  Serial.print("Moving ");
+  Serial.print(activeMotorCount);
+  Serial.print(" motor(s), Steps: [");
+  for(int i = 0; i < NUM_JOINTS; i++) {
+    Serial.print(stepsNeeded[i]);
+    if(i < NUM_JOINTS - 1) Serial.print(", ");
+  }
+  Serial.println("]");
+  
+  // Synchronized stepping with acceleration profile
+  for(long mainStep = 0; mainStep < maxSteps; mainStep++) {
+    // Calculate delay for smooth acceleration/deceleration
+    int stepDelay = calculateDelay(mainStep, maxSteps);
+    
+    // Determine which motors should step this iteration
+    bool shouldStep[NUM_JOINTS];
+    
+    for(int i = 0; i < NUM_JOINTS; i++) {
+      shouldStep[i] = false;
+      if(motorActive[i]) {
+        // Calculate how many steps this motor should have taken by now
+        long targetSteps = ((mainStep + 1) * stepsNeeded[i]) / maxSteps;
+        
+        // If we're behind schedule, step this motor
+        if(stepsTaken[i] < targetSteps) {
+          shouldStep[i] = true;
+        }
+      }
+    }
+    
+    // Pulse HIGH for motors that need to step
+    for(int i = 0; i < NUM_JOINTS; i++) {
+      if(shouldStep[i]) {
+        digitalWrite(stepPins[i], HIGH);
+      }
+    }
+    
+    delayMicroseconds(PULSE_WIDTH);
+    
+    // Pulse LOW and update counters
+    for(int i = 0; i < NUM_JOINTS; i++) {
+      if(shouldStep[i]) {
+        digitalWrite(stepPins[i], LOW);
+        stepsTaken[i]++;
+      }
+    }
+    
+    delayMicroseconds(stepDelay);
+  }
+  
+  // Update current positions
+  for(int i = 0; i < NUM_JOINTS; i++) {
+    currentPos[i] = targetAngles[i];
+  }
+  
+  Serial.println("Movement complete");
+  Serial.println();
+}
+
+// Parse incoming serial command
+void parseCommand(String command) {
+  command.trim();
+  
+  if(command.startsWith("ANGLES,")) {
+    // Parse: ANGLES,j1,j2,j3,j4,j5,j6
+    String data = command.substring(7); // Remove "ANGLES,"
+    float angles[NUM_JOINTS];
+    int jointIndex = 0;
+    int lastComma = -1;
+    
+    for(int i = 0; i <= data.length(); i++) {
+      if(i == data.length() || data.charAt(i) == ',') {
+        if(jointIndex < NUM_JOINTS) {
+          String angleStr = data.substring(lastComma + 1, i);
+          angles[jointIndex] = angleStr.toFloat();
+          jointIndex++;
+        }
+        lastComma = i;
+      }
+    }
+    
+    if(jointIndex == NUM_JOINTS) {
+      Serial.println("Received command:");
+      moveToAngles(angles);
+    } else {
+      Serial.print("Error: Expected 6 angles, got ");
+      Serial.println(jointIndex);
+    }
+  }
+  else if(command == "HOME") {
+    Serial.println("Homing...");
+    float home[NUM_JOINTS] = {0, 0, 0, 0, 0, 0};
+    moveToAngles(home);
+  }
+  else if(command == "STATUS") {
+    Serial.print("Current Position: [");
+    for(int i = 0; i < NUM_JOINTS; i++) {
+      Serial.print(currentPos[i], 2);
+      if(i < NUM_JOINTS - 1) Serial.print(", ");
+    }
+    Serial.println("]");
+  }
+  else {
+    Serial.print("Unknown command: ");
+    Serial.println(command);
+  }
+}
+
+void loop() {
+  // Check for serial commands
+  if(Serial.available() > 0) {
+    String command = Serial.readStringUntil('\n');
+    parseCommand(command);
+  }
+}
