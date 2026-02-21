@@ -22,7 +22,9 @@ from mpl_toolkits.mplot3d import Axes3D
 # ============================================================================
 
 SIMULATION_FIRST = True  # Always simulate before sending to real robot
-DELAY_BETWEEN_WAYPOINTS = 0  # seconds between waypoints (real robot)
+DELAY_BETWEEN_WAYPOINTS = 0.1  # seconds between waypoints (real robot)
+SHOW_ANIMATION = False  # Set to False to skip animation and speed up execution
+SHOW_VISUALIZATION = True  # Set to False to skip static plot too
 
 # ============================================================================
 
@@ -57,7 +59,8 @@ class MotionExecutor:
     
     def execute_trajectory(self, waypoints, ik_method='optimization', 
                           simulate_first=SIMULATION_FIRST,
-                          animate=True, show_visualization=True):
+                          animate=SHOW_ANIMATION, 
+                          show_visualization=SHOW_VISUALIZATION):
         """
         Execute a trajectory with full workflow
         
@@ -70,7 +73,7 @@ class MotionExecutor:
         simulate_first : bool
             Show simulation before sending to real robot
         animate : bool
-            Show animation
+            Show animation (set to False for faster execution)
         show_visualization : bool
             Show static trajectory visualization
             
@@ -101,11 +104,15 @@ class MotionExecutor:
         if show_visualization:
             print("\n📊 Step 2: Showing trajectory visualization...")
             self.trajectory_planner.visualize_trajectory(show_path=True, show_frames=False)
+        else:
+            print("\n⏭️  Step 2: Skipping visualization (disabled)")
         
         # Step 3: Animate trajectory
         if animate:
             print("\n🎬 Step 3: Animating trajectory...")
             self.trajectory_planner.animate_trajectory(duration=5.0)
+        else:
+            print("\n⏭️  Step 3: Skipping animation (disabled for faster execution)")
         
         # Step 4: Ask for confirmation if using real robot
         if self.use_robot and self.robot and self.robot.connected:
@@ -126,7 +133,7 @@ class MotionExecutor:
     
     def _execute_on_robot(self, joint_trajectory):
         """
-        Send trajectory to real robot waypoint by waypoint
+        Send trajectory to real robot for smooth execution
         
         Parameters:
         -----------
@@ -139,37 +146,25 @@ class MotionExecutor:
             True if all waypoints executed successfully
         """
         total = len(joint_trajectory)
-        print(f"\n🤖 Executing {total} waypoints on real robot...")
+        print(f"\n🤖 Sending trajectory to robot ({total} waypoints)...")
         print("-"*70)
         
-        for i, angles in enumerate(joint_trajectory):
-            # Show progress
-            progress = (i + 1) / total * 100
-            print(f"[{i+1}/{total}] ({progress:.1f}%) Waypoint {i+1}...", end='', flush=True)
-            
-            # Send command with skip_confirmation=True (no asking yes/no for each)
-            success = self.robot.send_joint_angles(
-                angles, 
-                wait_for_response=True,
-                skip_confirmation=True  # Don't ask for each waypoint
-            )
-            
-            if not success:
-                print(f" ❌ Failed!")
-                return False
-            
-            print(" ✓")
-            
-            # Small delay between waypoints
-            if i < total - 1:
-                time.sleep(DELAY_BETWEEN_WAYPOINTS)
+        # Use new trajectory mode for smooth execution
+        success = self.robot.send_trajectory(joint_trajectory, wait_for_completion=True)
         
-        print("\n" + "="*70)
-        print("✓ Trajectory execution complete!")
-        print("="*70)
-        return True
+        if success:
+            print("\n" + "="*70)
+            print("✓ Trajectory execution complete!")
+            print("="*70)
+        else:
+            print("\n" + "="*70)
+            print("❌ Trajectory execution failed")
+            print("="*70)
+        
+        return success
     
-    def execute_linear_motion(self, start_pos, end_pos, num_points=30):
+    def execute_linear_motion(self, start_pos, end_pos, num_points=30, 
+                             orientation=None, maintain_orientation=False):
         """
         Execute a linear motion from start to end
         
@@ -181,9 +176,56 @@ class MotionExecutor:
             End position [x, y, z]
         num_points : int
             Number of intermediate points
+        orientation : dict or list, optional
+            - If dict: {'euler': [roll, pitch, yaw]} for fixed orientation
+            - If list: [roll, pitch, yaw] for fixed orientation
+            - If None: IK chooses easiest orientation (default)
+        maintain_orientation : bool
+            If True and orientation is None, maintains current robot orientation
+            If False (default), IK finds easiest solution at each point
+        
+        Examples:
+        ---------
+        # Mode 1: Let IK find easiest orientation (default, most reliable)
+        executor.execute_linear_motion([100,100,300], [200,200,350])
+        
+        # Mode 2: Maintain current orientation
+        executor.execute_linear_motion([100,100,300], [200,200,350], 
+                                       maintain_orientation=True)
+        
+        # Mode 3: Use specific fixed orientation
+        executor.execute_linear_motion([100,100,300], [200,200,350],
+                                       orientation=[0, 45, 90])
         """
         print(f"\n🎯 Linear Motion: {start_pos} → {end_pos}")
-        waypoints = linear_trajectory(start_pos, end_pos, num_points)
+        
+        # Determine orientation mode
+        if orientation is not None:
+            # Mode 3: Fixed orientation specified
+            if isinstance(orientation, list):
+                orientation = {'euler': orientation}
+            print(f"   Mode: Fixed orientation {orientation['euler']}")
+            waypoints = linear_trajectory(start_pos, end_pos, num_points, 
+                                         orientation=orientation)
+        
+        elif maintain_orientation:
+            # Mode 2: Maintain current orientation
+            from forward_kinematics import forward_kinematics
+            _, _, ee_pose = forward_kinematics(self.robot.current_angles if self.robot else [0]*6)
+            current_R = ee_pose['orientation']
+            from trajectory_planner import euler_from_rotation_matrix
+            roll, pitch, yaw = euler_from_rotation_matrix(current_R)
+            orientation = {'euler': [roll, pitch, yaw]}
+            print(f"   Mode: Maintaining current orientation [R={roll:.1f}°, P={pitch:.1f}°, Y={yaw:.1f}°]")
+            waypoints = linear_trajectory(start_pos, end_pos, num_points, 
+                                         orientation=orientation)
+        
+        else:
+            # Mode 1: Let IK find easiest orientation (default)
+            print(f"   Mode: IK finds easiest orientation at each point (most reliable)")
+            waypoints = linear_trajectory(start_pos, end_pos, num_points, 
+                                         orientation=None)
+        
         return self.execute_trajectory(waypoints)
     
     def execute_circular_motion(self, center, radius, num_points=40, axis='z'):
@@ -284,6 +326,62 @@ class MotionExecutor:
         """
         print(f"\n⚙️ Custom Motion: {len(waypoints)} waypoints")
         return self.execute_trajectory(waypoints)
+    
+    def execute_straight_line_constant_orientation(self, start_pos, end_pos, 
+                                                   orientation_euler=None,
+                                                   num_points=50):
+        """
+        Move in a straight line while keeping orientation constant
+        
+        Parameters:
+        -----------
+        start_pos : array-like
+            Start position [x, y, z]
+        end_pos : array-like
+            End position [x, y, z]
+        orientation_euler : array-like, optional
+            Fixed orientation [roll, pitch, yaw] in degrees
+            If None, uses current robot orientation
+        num_points : int
+            Number of waypoints (more = smoother)
+            
+        Returns:
+        --------
+        success : bool
+        """
+        print(f"\n📏 Straight Line with Constant Orientation")
+        print(f"   From: {start_pos}")
+        print(f"   To:   {end_pos}")
+        
+        # Get orientation
+        if orientation_euler is None:
+            # Use current robot orientation
+            from forward_kinematics import forward_kinematics
+            current_angles = self.robot.current_angles if self.robot else [0]*6
+            _, _, ee_pose = forward_kinematics(current_angles)
+            current_R = ee_pose['orientation']
+            from trajectory_planner import euler_from_rotation_matrix
+            roll, pitch, yaw = euler_from_rotation_matrix(current_R)
+            orientation_euler = [roll, pitch, yaw]
+            print(f"   Using current orientation: R={roll:.1f}°, P={pitch:.1f}°, Y={yaw:.1f}°")
+        else:
+            print(f"   Fixed orientation: R={orientation_euler[0]:.1f}°, P={orientation_euler[1]:.1f}°, Y={orientation_euler[2]:.1f}°")
+        
+        # Create waypoints with constant orientation
+        waypoints = []
+        start_pos = np.array(start_pos)
+        end_pos = np.array(end_pos)
+        
+        for i in range(num_points):
+            t = i / (num_points - 1)
+            pos = start_pos + (end_pos - start_pos) * t
+            
+            waypoints.append({
+                'position': pos.tolist(),
+                'euler': orientation_euler  # Same orientation for all points
+            })
+        
+        return self.execute_trajectory(waypoints, ik_method='optimization')
     
     def disconnect(self):
         """Disconnect from robot"""
