@@ -247,6 +247,90 @@ class RobotController:
         print("\n🏠 Homing robot...")
         return self.send_joint_angles([0, 0, 0, 0, 0, 0], wait_for_response)
     
+    def send_trajectory(self, joint_trajectory, wait_for_completion=True):
+        """
+        Send entire trajectory to robot for smooth execution
+        
+        Parameters:
+        -----------
+        joint_trajectory : list of arrays
+            List of joint angle configurations
+        wait_for_completion : bool
+            Whether to wait for trajectory completion
+            
+        Returns:
+        --------
+        success : bool
+            True if trajectory sent and executed successfully
+        """
+        if not self.connected:
+            print("✗ Not connected to robot")
+            return False
+        
+        num_points = len(joint_trajectory)
+        print(f"\n📡 Uploading trajectory ({num_points} waypoints) to robot...")
+        
+        try:
+            # Start trajectory mode
+            self.serial.write(b"TRAJ_START\n")
+            time.sleep(0.1)
+            
+            # Clear startup message
+            while self.serial.in_waiting:
+                self.serial.readline()
+            
+            # Send all waypoints
+            for i, angles in enumerate(joint_trajectory):
+                command = "TRAJ_POINT," + ",".join([f"{a:.2f}" for a in angles]) + "\n"
+                self.serial.write(command.encode('utf-8'))
+                
+                # Show progress
+                if (i + 1) % 10 == 0 or i == num_points - 1:
+                    progress = (i + 1) / num_points * 100
+                    print(f"  Uploaded {i+1}/{num_points} ({progress:.1f}%)")
+                
+                time.sleep(0.01)  # Small delay between points
+            
+            # Wait for all acknowledgments
+            time.sleep(0.2)
+            while self.serial.in_waiting:
+                self.serial.read()  # Clear buffer
+            
+            print("✓ Trajectory uploaded successfully")
+            
+            # Execute trajectory
+            print("\n🚀 Executing trajectory...")
+            self.serial.write(b"TRAJ_EXECUTE\n")
+            
+            if wait_for_completion:
+                # Monitor execution
+                start_time = time.time()
+                while True:
+                    if self.serial.in_waiting:
+                        line = self.serial.readline().decode('utf-8', errors='ignore').strip()
+                        if line:
+                            print(f"  {line}")
+                            if "Trajectory complete" in line:
+                                break
+                    
+                    # Timeout after 5 minutes
+                    if time.time() - start_time > 300:
+                        print("⚠ Timeout waiting for trajectory completion")
+                        break
+                    
+                    time.sleep(0.1)
+                
+                # Update current position to last point
+                self.current_angles = list(joint_trajectory[-1])
+                if self.simulator:
+                    self.simulator.current_angles = np.array(joint_trajectory[-1])
+            
+            return True
+            
+        except Exception as e:
+            print(f"✗ Error sending trajectory: {e}")
+            return False
+    
     def get_current_angles(self):
         """Get current joint angles (last commanded position)"""
         return self.current_angles.copy()
