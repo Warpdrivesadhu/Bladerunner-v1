@@ -167,7 +167,8 @@ def interpolate_poses(start_pose, end_pose, num_steps):
 # Trajectory Types
 # ============================================================================
 
-def linear_trajectory(start_pos, end_pos, num_points=50, orientation=None):
+def linear_trajectory(start_pos, end_pos, num_points=50, orientation=None, 
+                     maintain_orientation=False, start_orientation=None):
     """
     Create a straight line trajectory
     
@@ -180,7 +181,11 @@ def linear_trajectory(start_pos, end_pos, num_points=50, orientation=None):
     num_points : int
         Number of points along the line
     orientation : dict, optional
-        Constant orientation or None
+        Constant orientation for all points {'euler': [r,p,y]} or {'orientation': R}
+    maintain_orientation : bool
+        If True, interpolate orientation from start to end
+    start_orientation : dict, optional
+        Starting orientation (used with maintain_orientation)
         
     Returns:
     --------
@@ -196,8 +201,13 @@ def linear_trajectory(start_pos, end_pos, num_points=50, orientation=None):
         pos = start_pos + (end_pos - start_pos) * t
         
         waypoint = {'position': pos}
+        
+        # Add orientation if specified
         if orientation:
             waypoint.update(orientation)
+        elif maintain_orientation and start_orientation:
+            # Maintain the same orientation throughout
+            waypoint.update(start_orientation)
         
         waypoints.append(waypoint)
     
@@ -426,7 +436,7 @@ class TrajectoryExecutor:
             print("No trajectory to visualize")
             return
         
-        fig = plt.figure(figsize=(6, 8))
+        fig = plt.figure(figsize=(14, 10))
         ax = fig.add_subplot(111, projection='3d')
         
         # Calculate all end effector positions
@@ -518,7 +528,7 @@ class TrajectoryExecutor:
         
         print(f"\n🎬 Animating trajectory...")
         
-        fig = plt.figure(figsize=(6, 8))
+        fig = plt.figure(figsize=(14, 10))
         ax = fig.add_subplot(111, projection='3d')
         
         # Pre-calculate all positions for the path
